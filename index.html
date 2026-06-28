@@ -37,9 +37,29 @@
       </div>
       <div class="chips" id="product-chips"></div>
     </div>
-    <div class="seg" id="ov-compare-toggle">
-      <button class="on" data-mode="single">Current</button>
-      <button data-mode="compare">vs Prior</button>
+  </div>
+
+  <!-- PERIOD BAR -->
+  <div class="periodbar">
+    <div class="pb-row">
+      <span class="pb-label">Period</span>
+      <div class="seg pb-presets" id="period-presets"></div>
+      <div class="pb-range">
+        <select id="period-from" aria-label="Period from"></select>
+        <span class="pb-arrow">→</span>
+        <select id="period-to" aria-label="Period to"></select>
+      </div>
+    </div>
+    <div class="pb-row">
+      <label class="pb-toggle"><input type="checkbox" id="cmp-toggle" checked> <span>Compare</span></label>
+      <div class="pb-cmp" id="compare-wrap">
+        <div class="seg pb-presets" id="compare-presets"></div>
+        <div class="pb-range">
+          <select id="compare-from" aria-label="Compare from"></select>
+          <span class="pb-arrow">→</span>
+          <select id="compare-to" aria-label="Compare to"></select>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -57,7 +77,7 @@
         <div class="chartbox"><canvas id="overview-chart"></canvas></div>
       </div>
       <div class="panel">
-        <div class="panel-h"><h2>Year over year</h2></div>
+        <div class="panel-h"><h2>Period comparison</h2></div>
         <div class="kstack" id="ov-cards"></div>
       </div>
     </div>
@@ -76,7 +96,7 @@
   <!-- HEATMAP -->
   <div id="sec-heatmap" class="hidden">
     <div class="panel" style="margin-bottom:16px">
-      <div class="panel-h"><h2>Area × <span id="hm-level-label">Family</span> — Recent 3M YoY</h2></div>
+      <div class="panel-h"><h2>Area × <span id="hm-level-label">Family</span></h2></div>
       <div class="tablescroll"><table class="heatmap-table" id="heatmap-table"></table></div>
       <div class="heat-legend">
         <span>YoY:</span>
@@ -117,8 +137,8 @@
           <th data-sort="name">Account <span class="sort-arrow">▲▼</span></th>
           <th data-sort="area">Area <span class="sort-arrow">▲▼</span></th>
           <th data-sort="status">Status <span class="sort-arrow">▲▼</span></th>
-          <th class="r sorted" data-sort="total12m">Total 12M <span class="sort-arrow">▼</span></th>
-          <th class="r" data-sort="recent3">Recent 3M <span class="sort-arrow">▲▼</span></th>
+          <th class="r sorted" data-sort="total">Total <span class="sort-arrow">▼</span></th>
+          <th class="r" data-sort="cmp">Compare <span class="sort-arrow">▲▼</span></th>
           <th class="r" data-sort="yoy">YoY <span class="sort-arrow">▲▼</span></th>
           <th>Trend</th>
         </tr></thead>

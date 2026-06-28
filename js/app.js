@@ -1,7 +1,13 @@
-/* UPC2 Account Monitor — app logic (ported from v4 prototype, Mist design)
-   Runs after the password gate decrypts the payload (see auth.js). */
+/* UPC2 Account Monitor — app logic (Mist design)
+   Runs after the password gate decrypts the payload (see auth.js).
+   Data model: each account holds a continuous monthly net/qty series aligned to
+   DATA.months. The user picks a "current period" and an optional "compare
+   period"; every view (chart, KPIs, status, table, pareto, heatmap) is computed
+   client-side from those two ranges — like choosing date ranges in a pivot. */
 window.initApp = function () {
 const DATA = window.DATA;
+const M = DATA.months;                       // ['YYYY-MM', ...] oldest → latest
+const LAST = M.length - 1;
 
 const FAM_ORDER = ['EPO', 'ZEMI'];
 const FAM_BRANDS = { EPO: ['ESPOGEN','EPOTIV','EUVAX'], ZEMI: ['ZEMIGLO','ZEMIMET','ZEMIDAPA'] };
@@ -10,15 +16,31 @@ const FAM_COLOR = {
   ZEMI: { color: '#F49800', light: '#FDF1DD' }
 };
 const MIST_ACCENT = { color: '#0e9384', tint: '#e1f4f0', bar: '#bfe6df' };
+const YEARS = [...new Set(M.map(m => +m.slice(0,4)))].sort();
+
+/* ---------- period helpers ---------- */
+const last12 = () => ({ from: Math.max(0, M.length - 12), to: LAST });
+const fullYear = y => {
+  let from = -1, to = -1;
+  M.forEach((m,i) => { if (+m.slice(0,4) === y) { if (from < 0) from = i; to = i; } });
+  return from < 0 ? null : { from, to };
+};
+const ytd = () => fullYear(+DATA.latest_month.slice(0,4));
+const priorOf = p => ({ from: p.from - 12, to: p.to - 12 });   // same months, year before
+const clampRange = r => ({ from: Math.min(r.from, r.to), to: Math.max(r.from, r.to) });
 
 let state = {
   level: 'family', scope: 'ALL', search: '', area: 'ALL', status: 'all',
-  sortBy: 'total12m', sortDir: 'desc', page: 1, perPage: 25,
-  detailScope: 'ALL', ovCompare: 'single', dCompare: 'single',
-  activeSection: 'overview'
+  sortBy: 'total', sortDir: 'desc', page: 1, perPage: 25,
+  detailScope: 'ALL', dCompare: 'single', activeSection: 'overview',
+  period: last12(), periodPreset: '12m',
+  compareOn: true, compare: priorOf(last12()), comparePreset: 'prior',
 };
+const P = () => state.period;
+const C = () => state.compareOn ? state.compare : impliedPrior();   // baseline even when compare is off
+function impliedPrior() { const p = state.period; const len = p.to - p.from; const to = p.from - 1; return { from: to - len, to }; }
 
-/* ---------- helpers ---------- */
+/* ---------- formatting ---------- */
 const fmt = n => Math.round(n).toLocaleString('en-US');
 const fmtCompact = n => {
   n = Math.round(n);
@@ -28,39 +50,51 @@ const fmtCompact = n => {
 };
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const monthLabel = m => { const [y,mo]=m.split('-'); return MONTH_NAMES[+mo-1]+" '"+y.slice(2); };
-const shortMonth = m => MONTH_NAMES[+m.split('-')[1]-1];
+const shortMonth = m => MONTH_NAMES[+m.split('-')[1]-1] + (m.endsWith('-01') ? " '"+m.slice(2,4) : '');
+const rangeLabel = r => r && r.from >= 0 && r.to <= LAST ? monthLabel(M[r.from]) + '–' + monthLabel(M[r.to]) : '—';
 const scopeColor = s => s==='EPO'||s==='ZEMI' ? FAM_COLOR[s] : { color: DATA.brands[s].color, light: DATA.brands[s].colorLight };
 const tint = (hex,pct) => `color-mix(in srgb, ${hex} ${pct}%, white)`;
 
 Chart.defaults.font.family = "'Space Grotesk', sans-serif";
 Chart.defaults.color = '#586675';
 
-function getMonthlyAcc(acc, scope) {
-  const len = DATA.months_curr.length;
-  if (scope === 'ALL') return { curr: acc.total_curr, prior: acc.total_prior };
+/* ---------- series access ---------- */
+function scopeSeries(acc, scope) {
+  if (scope === 'ALL') return acc.total;
   if (scope === 'EPO' || scope === 'ZEMI') {
-    const curr = new Array(len).fill(0), prior = new Array(len).fill(0);
-    for (const b of FAM_BRANDS[scope]) {
-      if (acc.brands[b]) {
-        acc.brands[b].net.forEach((v,i) => curr[i] += v);
-        acc.brands[b].net_prior.forEach((v,i) => prior[i] += v);
-      }
-    }
-    return { curr, prior };
+    const out = new Array(M.length).fill(0);
+    for (const b of FAM_BRANDS[scope]) if (acc.brands[b]) acc.brands[b].net.forEach((v,i) => out[i] += v);
+    return out;
   }
-  if (acc.brands[scope]) return { curr: acc.brands[scope].net.slice(), prior: acc.brands[scope].net_prior.slice() };
-  return { curr: new Array(len).fill(0), prior: new Array(len).fill(0) };
+  return acc.brands[scope] ? acc.brands[scope].net : new Array(M.length).fill(0);
 }
-const getStatus = (acc, scope) => acc.status[scope] || null;
+function sumR(arr, r) { let s = 0; for (let i = Math.max(0, r.from); i <= r.to; i++) s += arr[i] || 0; return s; }
 
-/* multi-area: ALL view shows merged accounts (combined sales); an area filter
-   shows per-area entries only. DU3/DU4 carry no EPO → hide those scopes there. */
+/* multi-area: ALL view shows merged accounts; an area filter shows per-area entries.
+   DU3/DU4 carry no EPO → those scopes hidden there. */
 const activeAccounts = () => state.area === 'ALL' ? DATA.accounts_merged : DATA.accounts.filter(a => a.area === state.area);
 const familiesForArea = () => state.area === 'ALL' ? FAM_ORDER : (DATA.area_families[state.area] || FAM_ORDER);
 const brandsForArea = () => state.area === 'ALL' ? Object.keys(DATA.brands) : (DATA.area_brands[state.area] || Object.keys(DATA.brands));
 const accId = a => a.code + '|' + a.area;
 
-/* ---------- theming: accent cascades through the Mist UI ---------- */
+function statusFor(acc, scope) {
+  const ser = scopeSeries(acc, scope);
+  if (scope !== 'ALL' && !ser.some(v => v > 0)) return null;
+  const p = P(), c = C();
+  const cur = sumR(ser, p);
+  const base = sumR(ser, c);
+  let hadHistory = false;
+  for (let i = 0; i <= p.to; i++) if (ser[i] > 0) { hadHistory = true; break; }
+  const fm = acc.first_month;
+  if (fm >= M[p.from] && fm <= M[p.to]) return 'new';
+  if (cur === 0 && hadHistory) return 'at_risk';
+  if (base <= 0) return cur > 0 ? 'growing' : 'stable';
+  if (cur > base * 1.10) return 'growing';
+  if (cur >= base * 0.90) return 'stable';
+  return 'at_risk';
+}
+
+/* ---------- theming ---------- */
 function applyTheme() {
   const r = document.documentElement.style;
   const label = document.getElementById('theme-label');
@@ -78,12 +112,70 @@ function applyTheme() {
   }
 }
 
-/* ---------- static header bits ---------- */
-document.getElementById('range-label').textContent =
-  'WINDOW: ' + DATA.months_curr[0] + ' → ' + DATA.latest_month + ' · 24M DATA';
 document.getElementById('live-label').textContent =
   'SYNCED · ' + monthLabel(DATA.latest_month).toUpperCase().replace("'", '20') + ' · ' + DATA.total_accounts + ' ACCOUNTS';
-document.getElementById('s-new-sub').textContent = "FIRST BUY '" + DATA.latest_month.slice(2,4);
+
+/* ---------- period bar ---------- */
+function buildPeriodControls() {
+  const opts = M.map((m,i) => `<option value="${i}">${monthLabel(m)}</option>`).join('');
+  ['period-from','period-to','compare-from','compare-to'].forEach(id => document.getElementById(id).innerHTML = opts);
+
+  const periodPresets = [{id:'12m',label:'12M'}, {id:'ytd',label:'YTD'}, ...YEARS.map(y => ({id:'y'+y, label:String(y)}))];
+  const comparePresets = [{id:'prior',label:'Prior yr'}, ...YEARS.map(y => ({id:'y'+y, label:String(y)}))];
+  document.getElementById('period-presets').innerHTML = periodPresets.map(p => `<button data-preset="${p.id}">${p.label}</button>`).join('');
+  document.getElementById('compare-presets').innerHTML = comparePresets.map(p => `<button data-preset="${p.id}">${p.label}</button>`).join('');
+
+  document.getElementById('period-presets').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const r = resolvePreset(b.dataset.preset); if (!r) return;
+    state.period = r; state.periodPreset = b.dataset.preset;
+    if (state.comparePreset === 'prior') state.compare = priorOf(state.period);
+    state.page = 1; syncControls(); renderAll();
+  });
+  document.getElementById('compare-presets').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const r = resolvePreset(b.dataset.preset); if (!r) return;
+    state.compare = r; state.comparePreset = b.dataset.preset;
+    state.page = 1; syncControls(); renderAll();
+  });
+  const onSel = (fromId, toId, key, presetKey) => {
+    const upd = () => {
+      const r = clampRange({ from: +document.getElementById(fromId).value, to: +document.getElementById(toId).value });
+      state[key] = r; state[presetKey] = 'custom';
+      if (key === 'period' && state.comparePreset === 'prior') state.compare = priorOf(r);
+      state.page = 1; syncControls(); renderAll();
+    };
+    document.getElementById(fromId).addEventListener('change', upd);
+    document.getElementById(toId).addEventListener('change', upd);
+  };
+  onSel('period-from','period-to','period','periodPreset');
+  onSel('compare-from','compare-to','compare','comparePreset');
+
+  document.getElementById('cmp-toggle').addEventListener('change', e => {
+    state.compareOn = e.target.checked;
+    state.page = 1; syncControls(); renderAll();
+  });
+}
+function resolvePreset(id) {
+  if (id === '12m') return last12();
+  if (id === 'ytd') return ytd();
+  if (id === 'prior') return priorOf(state.period);
+  if (id[0] === 'y') return fullYear(+id.slice(1));
+  return null;
+}
+function syncControls() {
+  const p = state.period, c = state.compare;
+  document.getElementById('period-from').value = p.from;
+  document.getElementById('period-to').value = p.to;
+  document.getElementById('compare-from').value = Math.max(0, c.from);
+  document.getElementById('compare-to').value = Math.max(0, c.to);
+  document.getElementById('cmp-toggle').checked = state.compareOn;
+  document.getElementById('compare-wrap').classList.toggle('off', !state.compareOn);
+  document.querySelectorAll('#period-presets button').forEach(b => b.classList.toggle('on', b.dataset.preset === state.periodPreset));
+  document.querySelectorAll('#compare-presets button').forEach(b => b.classList.toggle('on', b.dataset.preset === state.comparePreset));
+  const live = document.getElementById('range-label');
+  live.textContent = 'PERIOD: ' + rangeLabel(p) + (state.compareOn ? '  vs  ' + rangeLabel(c) : '');
+}
 
 /* ---------- area tabs ---------- */
 function renderAreaTabs() {
@@ -97,7 +189,6 @@ function renderAreaTabs() {
   wrap.querySelectorAll('.area').forEach(b => b.addEventListener('click', () => {
     state.area = b.dataset.area; state.page = 1;
     wrap.querySelectorAll('.area').forEach(x => x.classList.toggle('on', x === b));
-    // scope may not exist in this area (e.g. EPO in DU3/DU4) → fall back to ALL
     const valid = ['ALL', ...familiesForArea(), ...brandsForArea()];
     if (!valid.includes(state.scope)) { state.scope = 'ALL'; applyTheme(); }
     renderProductChips();
@@ -153,57 +244,44 @@ document.querySelectorAll('#secnav a').forEach(t => {
 
 /* ---------- overview ---------- */
 let overviewChart = null;
-function aggForScope(scope, area) {
-  if (area === 'ALL') return DATA.upc2_agg[scope] || { curr: [], prior: [] };
-  const curr = new Array(DATA.months_curr.length).fill(0);
-  const prior = new Array(DATA.months_curr.length).fill(0);
-  DATA.accounts.filter(a => a.area === area).forEach(a => {
-    const m = getMonthlyAcc(a, scope);
-    m.curr.forEach((v,i) => curr[i] += v);
-    m.prior.forEach((v,i) => prior[i] += v);
-  });
-  return { curr, prior };
+function teamSeries(scope) {
+  const out = new Array(M.length).fill(0);
+  activeAccounts().forEach(a => { const s = scopeSeries(a, scope); for (let i = 0; i < out.length; i++) out[i] += s[i]; });
+  return out;
 }
-function ytdPair(curr, prior) {
-  const latestYear = DATA.latest_month.split('-')[0];
-  const priorYear = String(+latestYear - 1);
-  let c = 0, p = 0;
-  DATA.months_curr.forEach((m,i) => { if (m.startsWith(latestYear)) c += curr[i]; });
-  DATA.months_prior.forEach((m,i) => {
-    if (m.startsWith(priorYear) && DATA.months_curr.some(cm => cm.startsWith(latestYear) && cm.endsWith(m.split('-')[1])))
-      p += prior[i];
-  });
-  return { ytdCurr: c, ytdPrior: p, latestYear, priorYear };
-}
-function yoyKstack(currTotal, priorTotal, ytd) {
-  const yoy = priorTotal > 0 ? (currTotal - priorTotal) / priorTotal * 100 : (currTotal > 0 ? 100 : 0);
-  const ytdYoY = ytd.ytdPrior > 0 ? (ytd.ytdCurr - ytd.ytdPrior) / ytd.ytdPrior * 100 : (ytd.ytdCurr > 0 ? 100 : 0);
-  const sign = v => (v >= 0 ? '+' : '');
+function kpiStack(curTotal, cmpTotal) {
+  const yoy = cmpTotal > 0 ? (curTotal - cmpTotal) / cmpTotal * 100 : (curTotal > 0 ? 100 : 0);
+  const delta = curTotal - cmpTotal;
+  const sign = v => v >= 0 ? '+' : '';
   const cls = v => v >= 0 ? 'pos' : 'neg';
   return `
-    <div class="k"><span class="lab">Current 12M</span><span class="val">${fmtCompact(currTotal).replace('M','<small>M</small>')}</span></div>
-    <div class="k"><span class="lab">Prior 12M</span><span class="val" style="color:var(--txt-2)">${fmtCompact(priorTotal).replace('M','<small>M</small>')}</span></div>
-    <div class="k"><span class="lab">12M YoY</span><span class="val ${cls(yoy)}">${sign(yoy)}${yoy.toFixed(1)}%</span></div>
-    <div class="k"><span class="lab">YTD ’${ytd.latestYear.slice(2)} vs ’${ytd.priorYear.slice(2)}</span><span class="val ${cls(ytdYoY)}">${sign(ytdYoY)}${ytdYoY.toFixed(1)}%</span></div>
-    <div class="k"><span class="lab">YTD totals</span><span class="sub">${fmtCompact(ytd.ytdCurr)} vs ${fmtCompact(ytd.ytdPrior)}</span></div>`;
+    <div class="k"><span class="lab">Current period<small>${rangeLabel(P())}</small></span><span class="val">${fmtCompact(curTotal).replace('M','<small>M</small>')}</span></div>
+    <div class="k"><span class="lab">Compare period<small>${rangeLabel(C())}</small></span><span class="val" style="color:var(--txt-2)">${fmtCompact(cmpTotal).replace('M','<small>M</small>')}</span></div>
+    <div class="k"><span class="lab">YoY change</span><span class="val ${cls(yoy)}">${sign(yoy)}${yoy.toFixed(1)}%</span></div>
+    <div class="k"><span class="lab">Δ Absolute</span><span class="val ${cls(delta)}" style="font-size:18px">${sign(delta)}${fmtCompact(delta)}</span></div>`;
 }
 function renderOverview() {
-  const agg = aggForScope(state.scope, state.area);
-  const currTotal = agg.curr.reduce((s,v) => s+v, 0);
-  const priorTotal = agg.prior.reduce((s,v) => s+v, 0);
-  const ytd = ytdPair(agg.curr, agg.prior);
+  const ser = teamSeries(state.scope);
+  const p = P(), c = C();
+  const curSlice = ser.slice(p.from, p.to + 1);
+  const curTotal = curSlice.reduce((s,v) => s+v, 0);
+  const cmpTotal = sumR(ser, c);
 
   const scopeLabel = state.scope === 'ALL' ? 'All products' : (state.scope === 'EPO' || state.scope === 'ZEMI') ? state.scope + ' Family' : state.scope;
   document.getElementById('ov-title').textContent = 'Net sales / month — ' + scopeLabel;
   document.getElementById('ov-sub').textContent = (state.area === 'ALL' ? 'ALL AREAS' : state.area) + ' · THB';
-  document.getElementById('ov-cards').innerHTML = yoyKstack(currTotal, priorTotal, ytd);
+  document.getElementById('ov-cards').innerHTML = kpiStack(curTotal, cmpTotal);
 
-  if (overviewChart) overviewChart.destroy();
+  const labels = [];
+  for (let i = p.from; i <= p.to; i++) labels.push(shortMonth(M[i]));
   const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
-  const labels = DATA.months_curr.map(shortMonth);
-  const datasets = [{ label: 'Current window', data: agg.curr, backgroundColor: accent, borderRadius: 4, order: 2 }];
-  if (state.ovCompare === 'compare')
-    datasets.push({ label: 'Prior year', data: agg.prior, backgroundColor: '#c2cbd6', borderRadius: 4, order: 1 });
+  const datasets = [{ label: 'Current', data: curSlice, backgroundColor: accent, borderRadius: 4, order: 2 }];
+  let cmpSlice = null;
+  if (state.compareOn) {
+    cmpSlice = labels.map((_,k) => { const ci = c.from + k; return ci >= 0 && ci <= c.to ? ser[ci] : null; });
+    datasets.push({ label: 'Compare', data: cmpSlice, backgroundColor: '#c2cbd6', borderRadius: 4, order: 1 });
+  }
+  if (overviewChart) overviewChart.destroy();
   overviewChart = new Chart(document.getElementById('overview-chart'), {
     type: 'bar',
     data: { labels, datasets },
@@ -212,44 +290,38 @@ function renderOverview() {
       plugins: {
         legend: { position: 'bottom', labels: { font: { size: 11 }, boxWidth: 14, padding: 8 } },
         tooltip: { callbacks: {
-          title: ctx => monthLabel(DATA.months_curr[ctx[0].dataIndex]) + (state.ovCompare === 'compare' ? ' vs ' + monthLabel(DATA.months_prior[ctx[0].dataIndex]) : ''),
+          title: ctx => {
+            const k = ctx[0].dataIndex;
+            const cur = M[p.from + k];
+            const cm = state.compareOn && (c.from + k) >= 0 ? M[c.from + k] : null;
+            return monthLabel(cur) + (cm ? ' vs ' + monthLabel(cm) : '');
+          },
           label: ctx => ctx.dataset.label + ': ' + fmt(ctx.parsed.y)
         }}
       },
       scales: {
-        x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+        x: { grid: { display: false }, ticks: { font: { size: 10 }, autoSkip: true, maxRotation: 0 } },
         y: { grid: { color: '#eef1f5' }, ticks: { callback: v => fmtCompact(v), font: { size: 11 } } }
       }
     }
   });
 }
-document.getElementById('ov-compare-toggle').addEventListener('click', e => {
-  const b = e.target.closest('button'); if (!b) return;
-  document.querySelectorAll('#ov-compare-toggle button').forEach(x => x.classList.toggle('on', x === b));
-  state.ovCompare = b.dataset.mode;
-  if (state.activeSection === 'overview') renderOverview();
-});
 
 /* ---------- pareto ---------- */
 let paretoChart = null;
 function renderPareto() {
   const { scope, area } = state;
+  const p = P();
   const items = [];
   activeAccounts().forEach(a => {
-    const { curr } = getMonthlyAcc(a, scope);
-    const total = curr.reduce((s,v) => s+v, 0);
+    const total = sumR(scopeSeries(a, scope), p);
     if (total > 0) items.push({ code: a.code, name: a.name, area: a.area, total });
   });
   items.sort((a,b) => b.total - a.total);
-  const total = items.reduce((s,i) => s+i.total, 0);
-  let cum = 0;
-  items.forEach(it => {
-    cum += it.total;
-    it.share_pct = total > 0 ? it.total/total*100 : 0;
-    it.cum_pct = total > 0 ? cum/total*100 : 0;
-  });
-  const totalAccts = items.length;
   const grandTotal = items.reduce((s,i) => s+i.total, 0);
+  let cum = 0;
+  items.forEach(it => { cum += it.total; it.share_pct = grandTotal>0?it.total/grandTotal*100:0; it.cum_pct = grandTotal>0?cum/grandTotal*100:0; });
+  const totalAccts = items.length;
   let n80 = items.findIndex(it => it.cum_pct >= 80) + 1;
   if (n80 === 0) n80 = totalAccts;
   const pct80 = totalAccts > 0 ? n80/totalAccts*100 : 0;
@@ -257,7 +329,7 @@ function renderPareto() {
   const top1Share = items.length ? items[0].share_pct : 0;
 
   const scopeLabel = scope === 'ALL' ? 'All products' : (scope === 'EPO' || scope === 'ZEMI') ? scope + ' Family' : scope;
-  document.getElementById('pa-scope-label').textContent = scopeLabel;
+  document.getElementById('pa-scope-label').textContent = scopeLabel + ' · ' + rangeLabel(p);
   document.getElementById('pa-area-label').textContent = area === 'ALL' ? 'All areas' : area;
 
   const level = pct80 < 20 ? '● Highly concentrated' : pct80 < 35 ? '● Concentrated' : '● Diversified';
@@ -320,29 +392,37 @@ function yoyColor(yoy) {
   if (yoy < 30)   return { bg: '#22c55e', fg: '#ffffff' };
   return { bg: '#15803d', fg: '#ffffff' };
 }
+function areaScopeSeries(area, scope) {
+  const out = new Array(M.length).fill(0);
+  DATA.accounts.filter(a => a.area === area).forEach(a => { const s = scopeSeries(a, scope); for (let i = 0; i < out.length; i++) out[i] += s[i]; });
+  return out;
+}
 function renderHeatmap() {
-  document.getElementById('hm-level-label').textContent = state.level === 'family' ? 'Family' : 'Brand';
+  document.getElementById('hm-level-label').textContent = (state.level === 'family' ? 'Family' : 'Brand') + ' — ' + rangeLabel(P()) + ' vs ' + rangeLabel(C());
   const cols = state.level === 'family' ? familiesForArea() : brandsForArea();
   const rows = state.area === 'ALL' ? DATA.areas : [state.area];
-  const inArea = (area, c) => state.level === 'family'
-    ? (DATA.area_families[area] || []).includes(c)
-    : (DATA.area_brands[area] || []).includes(c);
-  let html = '<thead><tr><th></th>' + cols.map(c => {
-    const color = state.level === 'family' ? FAM_COLOR[c].color : DATA.brands[c].color;
-    return `<th style="color:${color}">${c}</th>`;
+  const p = P(), c = C();
+  const inArea = (area, x) => state.level === 'family'
+    ? (DATA.area_families[area] || []).includes(x)
+    : (DATA.area_brands[area] || []).includes(x);
+  let html = '<thead><tr><th></th>' + cols.map(x => {
+    const color = state.level === 'family' ? FAM_COLOR[x].color : DATA.brands[x].color;
+    return `<th style="color:${color}">${x}</th>`;
   }).join('') + '</tr></thead><tbody>';
   rows.forEach(area => {
     html += `<tr><td class="heat-area">${area}</td>`;
-    cols.forEach(c => {
-      const cell = DATA.heatmap[area]?.[c];
-      if (!inArea(area, c)) {
-        html += '<td></td>'; // product not sold in this area (e.g. EPO in DU3/DU4)
-      } else if (!cell || cell.yoy === null) {
+    cols.forEach(x => {
+      if (!inArea(area, x)) { html += '<td></td>'; return; }
+      const ser = areaScopeSeries(area, x);
+      const curr = sumR(ser, p), prior = sumR(ser, c);
+      const yoy = prior > 0 ? (curr - prior) / prior * 100 : (curr > 0 ? 100 : null);
+      if (curr === 0 && prior === 0) {
         html += `<td><div class="heat-cell" style="background:#e7ecf1;color:#8a95a4"><div class="h-yoy">—</div><div class="h-val">No data</div></div></td>`;
       } else {
-        const { bg, fg } = yoyColor(cell.yoy);
-        const sign = cell.yoy >= 0 ? '+' : '';
-        html += `<td><div class="heat-cell" style="background:${bg};color:${fg}" title="${area} × ${c}: ${fmtCompact(cell.curr)} vs prior ${fmtCompact(cell.prior)}"><div class="h-yoy">${sign}${cell.yoy.toFixed(1)}%</div><div class="h-val">${fmtCompact(cell.curr)}</div></div></td>`;
+        const { bg, fg } = yoyColor(yoy);
+        const sign = yoy >= 0 ? '+' : '';
+        const yoyTxt = yoy === null ? 'NEW' : sign + yoy.toFixed(1) + '%';
+        html += `<td><div class="heat-cell" style="background:${bg};color:${fg}" title="${area} × ${x}: ${fmtCompact(curr)} vs ${fmtCompact(prior)}"><div class="h-yoy">${yoyTxt}</div><div class="h-val">${fmtCompact(curr)}</div></div></td>`;
       }
     });
     html += '</tr>';
@@ -353,10 +433,7 @@ function renderHeatmap() {
 /* ---------- status strip ---------- */
 function renderStats() {
   const summary = { growing: 0, stable: 0, at_risk: 0, new: 0 };
-  activeAccounts().forEach(a => {
-    const s = a.status[state.scope];
-    if (s in summary) summary[s]++;
-  });
+  activeAccounts().forEach(a => { const s = statusFor(a, state.scope); if (s in summary) summary[s]++; });
   const total = summary.growing + summary.stable + summary.at_risk + summary.new;
   document.getElementById('s-total').textContent = total;
   ['growing','stable','at_risk','new'].forEach(k => document.getElementById('s-'+k).textContent = summary[k]);
@@ -366,15 +443,16 @@ function renderStats() {
 
 /* ---------- account table ---------- */
 function buildRow(acc) {
-  const { curr, prior } = getMonthlyAcc(acc, state.scope);
-  const status = getStatus(acc, state.scope);
+  const ser = scopeSeries(acc, state.scope);
+  const status = statusFor(acc, state.scope);
   if (status === null) return null;
-  const total12 = curr.reduce((s,v) => s+v, 0);
-  if (total12 === 0 && state.scope !== 'ALL') return null;
-  const recent3 = curr.slice(-3).reduce((s,v) => s+v, 0);
-  const prior3 = prior.slice(-3).reduce((s,v) => s+v, 0);
-  const yoy = prior3 > 0 ? (recent3 - prior3) / prior3 * 100 : (recent3 > 0 ? 100 : 0);
-  return { ...acc, monthly: curr, status, total12m: total12, recent3, prior3, yoy };
+  const p = P(), c = C();
+  const total = sumR(ser, p);
+  const cmp = sumR(ser, c);
+  if (total === 0 && status !== 'at_risk') return null;
+  const yoy = cmp > 0 ? (total - cmp) / cmp * 100 : (total > 0 ? 100 : 0);
+  const monthly = ser.slice(p.from, p.to + 1);
+  return { ...acc, monthly, status, total, cmp, yoy };
 }
 function getFilteredRows() {
   const rows = [];
@@ -403,20 +481,21 @@ function renderTable() {
   if (state.page > totalPages) state.page = totalPages;
   const start = (state.page - 1) * state.perPage;
   const page = rows.slice(start, start + state.perPage);
+  const p = P();
 
   document.getElementById('acc-tbody').innerHTML = page.map(r => {
     const max = Math.max(1, ...r.monthly);
     const spark = r.monthly.map((v,i) => {
       const h = v > 0 ? Math.max(8, v/max*100) : 4;
-      return `<i class="${i >= r.monthly.length-3 ? 'r' : ''}" style="height:${h}%" title="${monthLabel(DATA.months_curr[i])}: ${fmt(v)}"></i>`;
+      return `<i class="${i >= r.monthly.length-3 ? 'r' : ''}" style="height:${h}%" title="${monthLabel(M[p.from+i])}: ${fmt(v)}"></i>`;
     }).join('');
     const yoyCls = r.yoy > 0 ? 'pos' : r.yoy < 0 ? 'neg' : '';
     return `<tr data-id="${accId(r)}">
       <td><div class="acct">${r.name}</div><div class="c">${r.code}</div></td>
       <td>${r.area.split('+').map(a => `<span class="atag">${a}</span>`).join(' ')}</td>
       <td><span class="st st-${r.status}"><span class="d"></span>${STATUS_LABEL[r.status]}</span></td>
-      <td class="r money">${fmt(r.total12m)}</td>
-      <td class="r money" style="color:var(--txt-2)">${fmt(r.recent3)}</td>
+      <td class="r money">${fmt(r.total)}</td>
+      <td class="r money" style="color:var(--txt-2)">${fmt(r.cmp)}</td>
       <td class="r money ${yoyCls}" style="font-weight:600">${(r.yoy > 0 ? '+' : '')}${r.yoy.toFixed(1)}%</td>
       <td><span class="spark">${spark}</span></td>
     </tr>`;
@@ -471,27 +550,27 @@ document.getElementById('prev-page').addEventListener('click', () => { state.pag
 document.getElementById('next-page').addEventListener('click', () => { state.page++; renderTable(); });
 document.getElementById('btn-export').addEventListener('click', () => {
   const rows = getFilteredRows();
-  const header = ['Code','Account','Area','Status','Total 12M','Recent 3M','YoY %', ...DATA.months_curr.map(monthLabel)];
+  const p = P();
+  const months = []; for (let i = p.from; i <= p.to; i++) months.push(monthLabel(M[i]));
+  const header = ['Code','Account','Area','Status','Total','Compare','YoY %', ...months];
   const csv = [header.join(',')];
-  rows.forEach(r => csv.push([r.code, '"'+r.name.replace(/"/g,'""')+'"', r.area, r.status, r.total12m, r.recent3, r.yoy.toFixed(1), ...r.monthly].join(',')));
+  rows.forEach(r => csv.push([r.code, '"'+r.name.replace(/"/g,'""')+'"', r.area, r.status, r.total, r.cmp, r.yoy.toFixed(1), ...r.monthly].join(',')));
   const url = URL.createObjectURL(new Blob([csv.join('\n')], { type: 'text/csv' }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'upc2_accounts_' + state.scope + (state.area !== 'ALL' ? '_' + state.area : '') + '.csv';
+  link.download = 'upc2_' + state.scope + (state.area !== 'ALL' ? '_' + state.area : '') + '_' + M[p.from] + '_' + M[p.to] + '.csv';
   link.click();
   URL.revokeObjectURL(url);
 });
 
 /* ---------- detail panel ---------- */
 let trendChart = null, currentAccount = null;
-
 function openDetail(id) {
   currentAccount = activeAccounts().find(x => accId(x) === id);
   if (!currentAccount) return;
   state.detailScope = state.scope;
   state.dCompare = 'single';
-  document.querySelectorAll('#d-compare-toggle button').forEach(b =>
-    b.classList.toggle('on', b.dataset.mode === 'single'));
+  document.querySelectorAll('#d-compare-toggle button').forEach(b => b.classList.toggle('on', b.dataset.mode === 'single'));
   renderDetailProdFilter();
   renderDetail();
   document.getElementById('detail').classList.add('open');
@@ -516,10 +595,7 @@ function renderDetailProdFilter() {
   wrap.innerHTML = html;
   wrap.querySelectorAll('.chip').forEach(c => {
     if (c.dataset.dscope === state.detailScope) c.classList.add('on');
-    c.addEventListener('click', () => {
-      state.detailScope = c.dataset.dscope;
-      renderDetailProdFilter(); renderDetail();
-    });
+    c.addEventListener('click', () => { state.detailScope = c.dataset.dscope; renderDetailProdFilter(); renderDetail(); });
   });
 }
 document.getElementById('d-compare-toggle').addEventListener('click', e => {
@@ -532,18 +608,16 @@ document.getElementById('d-compare-toggle').addEventListener('click', e => {
 function renderDetail() {
   const acc = currentAccount;
   const scope = state.detailScope;
-  const { curr, prior } = getMonthlyAcc(acc, scope);
-  const status = getStatus(acc, scope);
+  const ser = scopeSeries(acc, scope);
+  const p = P(), c = C();
+  const status = statusFor(acc, scope);
+  const months = []; for (let i = p.from; i <= p.to; i++) months.push(i);
 
-  const total12 = curr.reduce((s,v) => s+v, 0);
-  const totalPrior = prior.reduce((s,v) => s+v, 0);
-  const recent3 = curr.slice(-3).reduce((s,v) => s+v, 0);
-  const prior3 = prior.slice(-3).reduce((s,v) => s+v, 0);
-  const yoy3 = prior3 > 0 ? (recent3 - prior3) / prior3 * 100 : (recent3 > 0 ? 100 : 0);
-  const yoyTotal = totalPrior > 0 ? (total12 - totalPrior) / totalPrior * 100 : 0;
-  const ytd = ytdPair(curr, prior);
+  const total = sumR(ser, p);
+  const cmp = sumR(ser, c);
+  const nCur = p.to - p.from + 1, nCmp = c.to - Math.max(0,c.from) + 1;
+  const yoy = cmp > 0 ? (total - cmp) / cmp * 100 : (total > 0 ? 100 : 0);
 
-  // header color follows detail scope
   const header = document.querySelector('.detail-header');
   header.style.background = scope === 'ALL'
     ? getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
@@ -551,38 +625,37 @@ function renderDetail() {
 
   document.getElementById('d-name').textContent = acc.name;
   document.getElementById('d-sub').textContent = acc.code + ' · ' + acc.area + (scope !== 'ALL' ? ' · ' + scope : '');
-  document.getElementById('d-total').textContent = fmt(total12);
-  document.getElementById('d-recent').textContent = fmt(recent3/3);
-  document.getElementById('d-prior').textContent = fmt(prior3/3);
-  const yoyCls = yoy3 > 0 ? 'pos' : yoy3 < 0 ? 'neg' : '';
-  document.getElementById('d-yoy').innerHTML = `<span class="${yoyCls}">${yoy3 > 0 ? '+' : ''}${yoy3.toFixed(1)}%</span>`;
-
-  document.getElementById('d-yoy-cards').innerHTML = yoyKstack(total12, totalPrior, ytd);
+  document.getElementById('d-total').textContent = fmt(total);
+  document.getElementById('d-recent').textContent = fmt(total / nCur);
+  document.getElementById('d-prior').textContent = fmt(cmp / Math.max(1,nCmp));
+  const yoyCls = yoy > 0 ? 'pos' : yoy < 0 ? 'neg' : '';
+  document.getElementById('d-yoy').innerHTML = `<span class="${yoyCls}">${yoy > 0 ? '+' : ''}${yoy.toFixed(1)}%</span>`;
+  document.getElementById('d-yoy-cards').innerHTML = kpiStack(total, cmp);
 
   let explain = '';
-  if (status === 'growing') explain = `<b style="color:var(--grow)">● Growing</b> — Recent 3M avg ${fmt(recent3/3)} vs prior year ${fmt(prior3/3)} (${yoy3 > 0 ? '+' : ''}${yoy3.toFixed(1)}%) → โต > 10% ขยายต่อได้`;
-  else if (status === 'stable') explain = `<b style="color:var(--stable)">● Stable</b> — Recent 3M vs prior year ±10% (${yoy3 > 0 ? '+' : ''}${yoy3.toFixed(1)}%) → ทรงตัว maintain`;
-  else if (status === 'at_risk') explain = `<b style="color:var(--risk)">● At Risk</b> — Recent 3M avg ${fmt(recent3/3)} vs prior ${fmt(prior3/3)} (${yoy3.toFixed(1)}%) → ต้องคุยกับลูกค้า`;
-  else if (status === 'new') explain = `<b style="color:var(--new)">✦ New</b> — ลูกค้าใหม่ เริ่มซื้อปี ${acc.first_year} → เก็บ data, สร้าง relationship`;
+  const avgCur = fmt(total / nCur), avgCmp = fmt(cmp / Math.max(1,nCmp));
+  if (status === 'growing') explain = `<b style="color:var(--grow)">● Growing</b> — current ${avgCur}/mo vs compare ${avgCmp}/mo (${yoy > 0 ? '+' : ''}${yoy.toFixed(1)}%) → โต > 10% ขยายต่อได้`;
+  else if (status === 'stable') explain = `<b style="color:var(--stable)">● Stable</b> — current vs compare ±10% (${yoy > 0 ? '+' : ''}${yoy.toFixed(1)}%) → ทรงตัว maintain`;
+  else if (status === 'at_risk') explain = `<b style="color:var(--risk)">● At Risk</b> — current ${avgCur}/mo vs compare ${avgCmp}/mo (${yoy.toFixed(1)}%) → ต้องคุยกับลูกค้า`;
+  else if (status === 'new') explain = `<b style="color:var(--new)">✦ New</b> — ลูกค้าใหม่ เริ่มซื้อ ${monthLabel(acc.first_month)} → เก็บ data, สร้าง relationship`;
   else explain = 'ไม่มียอดขายในกลุ่มสินค้านี้';
   document.getElementById('d-explain').innerHTML = explain;
 
   if (trendChart) trendChart.destroy();
-  const labels = DATA.months_curr.map(shortMonth);
+  const labels = months.map(i => shortMonth(M[i]));
   let datasets;
   if (state.dCompare === 'compare') {
-    const accent = scope === 'ALL'
-      ? getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
-      : scopeColor(scope).color;
+    const accent = scope === 'ALL' ? getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() : scopeColor(scope).color;
+    const cmpData = labels.map((_,k) => { const ci = c.from + k; return ci >= 0 && ci <= c.to ? ser[ci] : null; });
     datasets = [
-      { label: 'Current year', data: curr, backgroundColor: accent, borderRadius: 3, order: 2 },
-      { label: 'Prior year', data: prior, backgroundColor: '#c2cbd6', borderRadius: 3, order: 1 }
+      { label: 'Current', data: months.map(i => ser[i]), backgroundColor: accent, borderRadius: 3, order: 2 },
+      { label: 'Compare', data: cmpData, backgroundColor: '#c2cbd6', borderRadius: 3, order: 1 }
     ];
   } else if (scope === 'ALL' || scope === 'EPO' || scope === 'ZEMI') {
     const brandsToShow = scope === 'ALL' ? Object.keys(acc.brands) : FAM_BRANDS[scope].filter(b => acc.brands[b]);
-    datasets = brandsToShow.map(b => ({ label: b, data: acc.brands[b].net, backgroundColor: DATA.brands[b]?.color || '#888' }));
+    datasets = brandsToShow.map(b => ({ label: b, data: months.map(i => acc.brands[b].net[i]), backgroundColor: DATA.brands[b]?.color || '#888' }));
   } else {
-    datasets = [{ label: scope, data: acc.brands[scope]?.net || [], backgroundColor: DATA.brands[scope]?.color || '#888' }];
+    datasets = [{ label: scope, data: months.map(i => acc.brands[scope] ? acc.brands[scope].net[i] : 0), backgroundColor: DATA.brands[scope]?.color || '#888' }];
   }
   trendChart = new Chart(document.getElementById('trend-chart'), {
     type: 'bar',
@@ -592,28 +665,30 @@ function renderDetail() {
       plugins: {
         legend: { position: 'bottom', labels: { font: { size: 11 }, boxWidth: 12, padding: 8 } },
         tooltip: { callbacks: {
-          title: ctx => state.dCompare === 'compare'
-            ? monthLabel(DATA.months_curr[ctx[0].dataIndex]) + ' vs ' + monthLabel(DATA.months_prior[ctx[0].dataIndex])
-            : monthLabel(DATA.months_curr[ctx[0].dataIndex]),
+          title: ctx => {
+            const k = ctx[0].dataIndex;
+            const cm = state.dCompare === 'compare' && (c.from + k) >= 0 ? M[c.from + k] : null;
+            return monthLabel(M[p.from + k]) + (cm ? ' vs ' + monthLabel(cm) : '');
+          },
           label: ctx => ctx.dataset.label + ': ' + fmt(ctx.parsed.y)
         }}
       },
       scales: {
-        x: { stacked: state.dCompare === 'single', grid: { display: false }, ticks: { font: { size: 10 } } },
+        x: { stacked: state.dCompare === 'single', grid: { display: false }, ticks: { font: { size: 10 }, autoSkip: true, maxRotation: 0 } },
         y: { stacked: state.dCompare === 'single', grid: { color: '#eef1f5' }, ticks: { callback: v => fmtCompact(v), font: { size: 11 } } }
       }
     }
   });
 
-  // brand × month table
+  // brand × month table (current period months)
   let brandsToShow;
   if (scope === 'ALL') brandsToShow = Object.keys(acc.brands);
   else if (scope === 'EPO' || scope === 'ZEMI') brandsToShow = FAM_BRANDS[scope].filter(b => acc.brands[b]);
   else brandsToShow = [scope];
-  let bthtml = '<thead><tr><th>Brand</th>' + DATA.months_curr.map(m => `<th class="r">${shortMonth(m)}</th>`).join('') + '<th class="r">Total</th></tr></thead><tbody>';
+  let bthtml = '<thead><tr><th>Brand</th>' + months.map(i => `<th class="r">${shortMonth(M[i])}</th>`).join('') + '<th class="r">Total</th></tr></thead><tbody>';
   brandsToShow.forEach(b => {
     if (!acc.brands[b]) return;
-    const vals = acc.brands[b].net;
+    const vals = months.map(i => acc.brands[b].net[i]);
     const tot = vals.reduce((s,v) => s+v, 0);
     bthtml += `<tr><td class="bt-brand" style="color:${DATA.brands[b]?.color || '#888'}">${b}</td>`
             + vals.map(v => `<td class="r">${v > 0 ? fmtCompact(v) : '—'}</td>`).join('')
@@ -621,8 +696,9 @@ function renderDetail() {
   });
   document.getElementById('brand-table').innerHTML = bthtml + '</tbody>';
 
-  // transactions
-  let txns = acc.txns;
+  // transactions (within current period)
+  const lo = M[p.from], hi = M[p.to];
+  let txns = acc.txns.filter(t => t.date.slice(0,7) >= lo && t.date.slice(0,7) <= hi);
   if (scope === 'EPO') txns = txns.filter(t => FAM_BRANDS.EPO.includes(t.brand));
   else if (scope === 'ZEMI') txns = txns.filter(t => FAM_BRANDS.ZEMI.includes(t.brand));
   else if (scope !== 'ALL') txns = txns.filter(t => t.brand === scope);
@@ -633,7 +709,7 @@ function renderDetail() {
       <span><span class="txn-brand-tag" style="background:${DATA.brands[t.brand]?.color || '#888'}">${t.brand}</span> <span class="txn-mat">${t.material}</span></span>
       <span class="txn-qty">${t.qty}</span>
       <span class="txn-net">${fmt(t.net)}</span>
-    </div>`).join('');
+    </div>`).join('') || '<div class="txn-row" style="color:var(--txt-3)">ไม่มี transaction ในช่วงนี้</div>';
 }
 
 document.getElementById('close-detail').addEventListener('click', closeDetail);
@@ -646,6 +722,8 @@ function closeDetail() {
 
 /* ---------- init ---------- */
 applyTheme();
+buildPeriodControls();
+syncControls();
 renderAreaTabs();
 renderProductChips();
 renderAll();

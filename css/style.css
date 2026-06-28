@@ -173,6 +173,21 @@ tbody tr:hover{background:var(--accent-tint)}
 .txn-qty{text-align:right;font-family:'JetBrains Mono',monospace;color:var(--txt-3)}
 .txn-net{text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600}
 
+/* Period bar */
+.periodbar{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--sh);padding:14px 16px;margin-bottom:18px;display:flex;flex-direction:column;gap:12px}
+.pb-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.pb-label{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--txt-3);min-width:58px}
+.pb-presets button{font:inherit;font-size:13px;font-weight:500;border:0;background:transparent;color:var(--txt-2);padding:8px 14px;border-radius:8px;cursor:pointer;min-height:40px}
+.pb-presets button.on{background:var(--panel);color:var(--accent);box-shadow:var(--sh)}
+.pb-range{display:inline-flex;align-items:center;gap:8px}
+.pb-range select{font:inherit;font-family:'JetBrains Mono',monospace;font-size:13px;border:1px solid var(--line);background:var(--bg);border-radius:9px;padding:9px 12px;color:var(--txt);cursor:pointer;min-height:42px}
+.pb-range select:focus{outline:none;border-color:var(--accent)}
+.pb-arrow{color:var(--txt-3)}
+.pb-toggle{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:500;color:var(--txt-2);cursor:pointer;min-width:58px;user-select:none}
+.pb-toggle input{width:18px;height:18px;accent-color:var(--accent);cursor:pointer}
+.pb-cmp{display:flex;align-items:center;gap:12px;flex-wrap:wrap;transition:opacity .15s}
+.pb-cmp.off{opacity:.35;pointer-events:none}
+
 /* Password gate */
 .gate{position:fixed;inset:0;background:var(--bg);z-index:100;display:grid;place-items:center;padding:20px}
 .gate-card{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--sh);padding:36px 32px;width:min(380px,100%);display:flex;flex-direction:column;gap:12px;text-align:center}
