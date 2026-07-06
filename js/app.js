@@ -37,8 +37,9 @@ let state = {
   compareOn: true, compare: priorOf(last12()), comparePreset: 'prior',
 };
 const P = () => state.period;
-const C = () => state.compareOn ? state.compare : impliedPrior();   // baseline even when compare is off
-function impliedPrior() { const p = state.period; const len = p.to - p.from; const to = p.from - 1; return { from: to - len, to }; }
+// Baseline for status/YoY. When Compare is off, ALWAYS fall back to the same
+// calendar months of the prior year (business rule) — not the preceding window.
+const C = () => state.compareOn ? state.compare : priorOf(state.period);
 
 /* ---------- formatting ---------- */
 const fmt = n => Math.round(n).toLocaleString('en-US');
@@ -51,7 +52,13 @@ const fmtCompact = n => {
 const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const monthLabel = m => { const [y,mo]=m.split('-'); return MONTH_NAMES[+mo-1]+" '"+y.slice(2); };
 const shortMonth = m => MONTH_NAMES[+m.split('-')[1]-1] + (m.endsWith('-01') ? " '"+m.slice(2,4) : '');
-const rangeLabel = r => r && r.from >= 0 && r.to <= LAST ? monthLabel(M[r.from]) + '–' + monthLabel(M[r.to]) : '—';
+// Honest label when a compare range falls (partly) outside available data:
+// fully outside → 'no data'; partly outside → clamp and mark '(partial)'.
+const rangeLabel = r => {
+  if (!r || r.to < 0 || r.from > LAST) return 'no data';
+  const from = Math.max(0, r.from), to = Math.min(LAST, r.to);
+  return monthLabel(M[from]) + '–' + monthLabel(M[to]) + (r.from < 0 || r.to > LAST ? ' (partial)' : '');
+};
 const scopeColor = s => s==='EPO'||s==='ZEMI' ? FAM_COLOR[s] : { color: DATA.brands[s].color, light: DATA.brands[s].colorLight };
 const tint = (hex,pct) => `color-mix(in srgb, ${hex} ${pct}%, white)`;
 
@@ -80,15 +87,16 @@ const accId = a => a.code + '|' + a.area;
 function statusFor(acc, scope) {
   const ser = scopeSeries(acc, scope);
   if (scope !== 'ALL' && !ser.some(v => v > 0)) return null;
-  const p = P(), c = C();
+  const p = P();
   const cur = sumR(ser, p);
-  const base = sumR(ser, c);
   let hadHistory = false;
   for (let i = 0; i <= p.to; i++) if (ser[i] > 0) { hadHistory = true; break; }
+  if (!hadHistory) return null;          // not a customer yet by period end → exclude
   const fm = acc.first_month;
   if (fm >= M[p.from] && fm <= M[p.to]) return 'new';
-  if (cur === 0 && hadHistory) return 'at_risk';
-  if (base <= 0) return cur > 0 ? 'growing' : 'stable';
+  if (cur === 0) return 'at_risk';       // had history but stopped in this period
+  const base = sumR(ser, C());
+  if (base <= 0) return 'growing';       // no baseline data, active now
   if (cur > base * 1.10) return 'growing';
   if (cur >= base * 0.90) return 'stable';
   return 'at_risk';
@@ -703,13 +711,16 @@ function renderDetail() {
   else if (scope === 'ZEMI') txns = txns.filter(t => FAM_BRANDS.ZEMI.includes(t.brand));
   else if (scope !== 'ALL') txns = txns.filter(t => t.brand === scope);
   document.getElementById('txn-count').textContent = txns.length;
-  document.getElementById('txn-list').innerHTML = txns.map(t => `
+  let txnHtml = txns.map(t => `
     <div class="txn-row">
       <span class="txn-date">${t.date}</span>
       <span><span class="txn-brand-tag" style="background:${DATA.brands[t.brand]?.color || '#888'}">${t.brand}</span> <span class="txn-mat">${t.material}</span></span>
       <span class="txn-qty">${t.qty}</span>
       <span class="txn-net">${fmt(t.net)}</span>
     </div>`).join('') || '<div class="txn-row" style="color:var(--txt-3)">ไม่มี transaction ในช่วงนี้</div>';
+  // only the last 100 txns are stored — older periods may look emptier than reality
+  if (acc.txns.length >= 100) txnHtml += '<div class="txn-row" style="color:var(--txt-3)">* เก็บเฉพาะ 100 รายการล่าสุด — ช่วงเก่าอาจแสดงไม่ครบ (ยอดรวมในกราฟ/ตารางครบถ้วน)</div>';
+  document.getElementById('txn-list').innerHTML = txnHtml;
 }
 
 document.getElementById('close-detail').addEventListener('click', closeDetail);
