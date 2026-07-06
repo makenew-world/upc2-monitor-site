@@ -152,7 +152,10 @@ tbody tr:hover{background:var(--accent-tint)}
 .d-sub{font-size:12px;opacity:.85;margin-top:4px}
 .close-btn{background:transparent;border:1px solid rgba(255,255,255,.4);color:#fff;width:44px;height:44px;border-radius:10px;cursor:pointer;font-size:20px;line-height:1;flex:0 0 auto}
 .detail-body{flex:1;overflow-y:auto;padding:18px 22px 32px}
-.dchips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.dchips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.dperiod{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.dperiod .pb-range select{min-height:38px;padding:7px 10px;font-size:12px}
+.dperiod .pb-presets button{min-height:34px;padding:5px 11px;font-size:12px}
 .dchips .label{font-size:11px;font-weight:600;color:var(--txt-3);text-transform:uppercase;align-self:center;letter-spacing:.08em;font-family:'JetBrains Mono',monospace}
 .dkpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;box-shadow:var(--sh)}

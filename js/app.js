@@ -35,6 +35,7 @@ let state = {
   detailScope: 'ALL', dCompare: 'single', activeSection: 'overview',
   period: last12(), periodPreset: '12m',
   compareOn: true, compare: priorOf(last12()), comparePreset: 'prior',
+  dPeriod: last12(), dPreset: 'main',   // detail panel's own period (init from main on open)
 };
 const P = () => state.period;
 // Baseline for status/YoY. When Compare is off, ALWAYS fall back to the same
@@ -84,10 +85,9 @@ const familiesForArea = () => state.area === 'ALL' ? FAM_ORDER : (DATA.area_fami
 const brandsForArea = () => state.area === 'ALL' ? Object.keys(DATA.brands) : (DATA.area_brands[state.area] || Object.keys(DATA.brands));
 const accId = a => a.code + '|' + a.area;
 
-function statusFor(acc, scope) {
+function statusFor(acc, scope, p = P(), c = C()) {
   const ser = scopeSeries(acc, scope);
   if (scope !== 'ALL' && !ser.some(v => v > 0)) return null;
-  const p = P();
   const cur = sumR(ser, p);
   let hadHistory = false;
   for (let i = 0; i <= p.to; i++) if (ser[i] > 0) { hadHistory = true; break; }
@@ -95,7 +95,7 @@ function statusFor(acc, scope) {
   const fm = acc.first_month;
   if (fm >= M[p.from] && fm <= M[p.to]) return 'new';
   if (cur === 0) return 'at_risk';       // had history but stopped in this period
-  const base = sumR(ser, C());
+  const base = sumR(ser, c);
   if (base <= 0) return 'growing';       // no baseline data, active now
   if (cur > base * 1.10) return 'growing';
   if (cur >= base * 0.90) return 'stable';
@@ -165,11 +165,38 @@ function buildPeriodControls() {
   });
 }
 function resolvePreset(id) {
+  if (id === 'main') return { ...state.period };
   if (id === '12m') return last12();
   if (id === 'ytd') return ytd();
   if (id === 'prior') return priorOf(state.period);
   if (id[0] === 'y') return fullYear(+id.slice(1));
   return null;
+}
+
+/* detail panel's own period picker (12M / YTD / years / custom, same Jan-2024 cap) */
+function buildDetailPeriodControls() {
+  const opts = M.map((m,i) => `<option value="${i}">${monthLabel(m)}</option>`).join('');
+  ['d-period-from','d-period-to'].forEach(id => document.getElementById(id).innerHTML = opts);
+  const presets = [{id:'main',label:'Main'}, {id:'12m',label:'12M'}, {id:'ytd',label:'YTD'}, ...YEARS.map(y => ({id:'y'+y, label:String(y)}))];
+  document.getElementById('d-period-presets').innerHTML = presets.map(p => `<button data-preset="${p.id}">${p.label}</button>`).join('');
+  document.getElementById('d-period-presets').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const r = resolvePreset(b.dataset.preset); if (!r) return;
+    state.dPeriod = r; state.dPreset = b.dataset.preset;
+    syncDetailControls(); renderDetail();
+  });
+  const upd = () => {
+    state.dPeriod = clampRange({ from: +document.getElementById('d-period-from').value, to: +document.getElementById('d-period-to').value });
+    state.dPreset = 'custom';
+    syncDetailControls(); renderDetail();
+  };
+  document.getElementById('d-period-from').addEventListener('change', upd);
+  document.getElementById('d-period-to').addEventListener('change', upd);
+}
+function syncDetailControls() {
+  document.getElementById('d-period-from').value = state.dPeriod.from;
+  document.getElementById('d-period-to').value = state.dPeriod.to;
+  document.querySelectorAll('#d-period-presets button').forEach(b => b.classList.toggle('on', b.dataset.preset === state.dPreset));
 }
 function syncControls() {
   const p = state.period, c = state.compare;
@@ -257,14 +284,14 @@ function teamSeries(scope) {
   activeAccounts().forEach(a => { const s = scopeSeries(a, scope); for (let i = 0; i < out.length; i++) out[i] += s[i]; });
   return out;
 }
-function kpiStack(curTotal, cmpTotal) {
+function kpiStack(curTotal, cmpTotal, p = P(), c = C()) {
   const yoy = cmpTotal > 0 ? (curTotal - cmpTotal) / cmpTotal * 100 : (curTotal > 0 ? 100 : 0);
   const delta = curTotal - cmpTotal;
   const sign = v => v >= 0 ? '+' : '';
   const cls = v => v >= 0 ? 'pos' : 'neg';
   return `
-    <div class="k"><span class="lab">Current period<small>${rangeLabel(P())}</small></span><span class="val">${fmtCompact(curTotal).replace('M','<small>M</small>')}</span></div>
-    <div class="k"><span class="lab">Compare period<small>${rangeLabel(C())}</small></span><span class="val" style="color:var(--txt-2)">${fmtCompact(cmpTotal).replace('M','<small>M</small>')}</span></div>
+    <div class="k"><span class="lab">Current period<small>${rangeLabel(p)}</small></span><span class="val">${fmtCompact(curTotal).replace('M','<small>M</small>')}</span></div>
+    <div class="k"><span class="lab">Compare period<small>${rangeLabel(c)}</small></span><span class="val" style="color:var(--txt-2)">${fmtCompact(cmpTotal).replace('M','<small>M</small>')}</span></div>
     <div class="k"><span class="lab">YoY change</span><span class="val ${cls(yoy)}">${sign(yoy)}${yoy.toFixed(1)}%</span></div>
     <div class="k"><span class="lab">Δ Absolute</span><span class="val ${cls(delta)}" style="font-size:18px">${sign(delta)}${fmtCompact(delta)}</span></div>`;
 }
@@ -578,6 +605,9 @@ function openDetail(id) {
   if (!currentAccount) return;
   state.detailScope = state.scope;
   state.dCompare = 'single';
+  state.dPeriod = { ...state.period };   // start from the main page's period
+  state.dPreset = 'main';
+  syncDetailControls();
   document.querySelectorAll('#d-compare-toggle button').forEach(b => b.classList.toggle('on', b.dataset.mode === 'single'));
   renderDetailProdFilter();
   renderDetail();
@@ -617,8 +647,8 @@ function renderDetail() {
   const acc = currentAccount;
   const scope = state.detailScope;
   const ser = scopeSeries(acc, scope);
-  const p = P(), c = C();
-  const status = statusFor(acc, scope);
+  const p = state.dPeriod, c = priorOf(p);   // detail's own period; baseline = prior-year same months
+  const status = statusFor(acc, scope, p, c);
   const months = []; for (let i = p.from; i <= p.to; i++) months.push(i);
 
   const total = sumR(ser, p);
@@ -638,7 +668,7 @@ function renderDetail() {
   document.getElementById('d-prior').textContent = fmt(cmp / Math.max(1,nCmp));
   const yoyCls = yoy > 0 ? 'pos' : yoy < 0 ? 'neg' : '';
   document.getElementById('d-yoy').innerHTML = `<span class="${yoyCls}">${yoy > 0 ? '+' : ''}${yoy.toFixed(1)}%</span>`;
-  document.getElementById('d-yoy-cards').innerHTML = kpiStack(total, cmp);
+  document.getElementById('d-yoy-cards').innerHTML = kpiStack(total, cmp, p, c);
 
   let explain = '';
   const avgCur = fmt(total / nCur), avgCmp = fmt(cmp / Math.max(1,nCmp));
@@ -734,8 +764,19 @@ function closeDetail() {
 /* ---------- init ---------- */
 applyTheme();
 buildPeriodControls();
+buildDetailPeriodControls();
 syncControls();
-renderAreaTabs();
+// single-area edition (per-team encrypted payload): lock to that area, hide the rail
+if (DATA.areas.length === 1) {
+  state.area = DATA.areas[0];
+  document.querySelector('.arealbl').classList.add('hidden');
+  document.getElementById('area-tabs').classList.add('hidden');
+  document.querySelector('.eyebrow').textContent = 'UPC2 // ' + state.area + ' TEAM';
+  const valid = ['ALL', ...familiesForArea(), ...brandsForArea()];
+  if (!valid.includes(state.scope)) state.scope = 'ALL';
+} else {
+  renderAreaTabs();
+}
 renderProductChips();
 renderAll();
 };
